@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Geo-Kineti-Cam",
     "author": "Jiovanie Velazquez",
-    "version": (0, 9, 0),
+    "version": (0, 9, 5),
     "blender": (4, 2, 0),
     "location": "View3D > Header & N-Panel",
     "description": "A buttery viewport controller for smooth kinetic based navigation.",
@@ -17,8 +17,6 @@ from bpy.app.handlers import persistent
 
 # --- CONSTANTS ---
 DEADZONE = 0.0005
-LOCK_VELOCITY_ROT = 0.15 
-LOCK_VELOCITY_LOC = 1.0  
 ADDON_NAME = __package__ if __package__ else __name__
 SCAN_INTERVAL = 0.1 
 
@@ -38,7 +36,7 @@ def get_default_state():
         "last_loc": None, 
         "last_rot": None,
         "last_dist": 0.0,
-        "snap_locked": False,
+        "last_is_perspective": True, # New tracking for Ortho/Persp switch
         "shake_suppressed": False, 
         "buffer_pan": [],
         "buffer_zoom": [],
@@ -154,13 +152,19 @@ def average_quat(buffer):
     return avg
 
 def stabilize_horizon(quat):
+    # Flatten Right Vector (X) to allow upside-down rotation
+    # while keeping the horizon level relative to the screen.
     mat = quat.to_matrix()
-    view_z = mat.col[2] 
-    if abs(view_z.z) > 0.99: return quat 
-    global_z = Vector((0,0,1))
-    new_x = global_z.cross(view_z).normalized()
-    new_y = view_z.cross(new_x).normalized()
-    new_mat = Matrix((new_x, new_y, view_z)).transposed()
+    view_z = mat.col[2] # Forward
+    view_x = mat.col[0] # Right
+
+    flat_x = Vector((view_x.x, view_x.y, 0))
+    if flat_x.length_squared < 0.001: return quat
+    
+    flat_x.normalize()
+    new_y = view_z.cross(flat_x).normalized()
+    new_mat = Matrix((flat_x, new_y, view_z)).transposed()
+    
     return new_mat.to_quaternion()
 
 def update_loop():
@@ -183,14 +187,16 @@ def update_loop():
         curr_loc = rv3d.view_location.copy()
         curr_rot = rv3d.view_rotation.copy()
         curr_dist = rv3d.view_distance
+        curr_is_persp = rv3d.is_perspective
 
         if _state["last_loc"] is None:
             _state["last_loc"] = curr_loc
             _state["last_rot"] = curr_rot
             _state["last_dist"] = curr_dist
+            _state["last_is_perspective"] = curr_is_persp
             return 0.01
 
-        # 4. VELOCITY
+        # 4. VELOCITY CALCS
         diff_loc = curr_loc - _state["last_loc"]
         diff_dist = curr_dist - _state["last_dist"]
         diff_rot = curr_rot @ _state["last_rot"].inverted()
@@ -199,20 +205,31 @@ def update_loop():
         speed_rot = diff_rot.angle
         speed_dist = abs(diff_dist)
 
-        if speed_loc > LOCK_VELOCITY_LOC or speed_rot > LOCK_VELOCITY_ROT or speed_dist > LOCK_VELOCITY_LOC:
-            _state["snap_locked"] = True
-            _state["shake_suppressed"] = True
+        # --- SMART SNAP DETECTION ---
+        # 1. Did we switch Ortho/Persp modes?
+        mode_switched = (curr_is_persp != _state["last_is_perspective"])
+        
+        # 2. Are we perfectly aligned to an Axis? (Gizmo/Numpad Snap)
+        # We check the View Z vector (Forward). If any component is ~1.0, we are snapped.
+        # Standard manual nav is rarely cleaner than 0.999
+        view_z = curr_rot.to_matrix().col[2]
+        is_axis_aligned = (abs(view_z.x) > 0.9999 or abs(view_z.y) > 0.9999 or abs(view_z.z) > 0.9999)
+
+        if mode_switched or is_axis_aligned:
+            # Kill momentum immediately so we stick the snap
             wipe_physics()
             _state["last_shake_offset_loc"] = Vector((0,0,0))
             _state["last_shake_offset_rot"] = Quaternion((1,0,0,0))
             
-        if _state["snap_locked"]:
-            if speed_loc < DEADZONE and speed_rot < DEADZONE and speed_dist < DEADZONE:
-                _state["snap_locked"] = False
+            # Reset history
             _state["last_loc"] = curr_loc
             _state["last_rot"] = curr_rot
             _state["last_dist"] = curr_dist
+            _state["last_is_perspective"] = curr_is_persp
             return 0.01
+        
+        _state["last_is_perspective"] = curr_is_persp
+        # ----------------------------
 
         # 5. CHECK SELECTION
         now = time.time()
@@ -264,8 +281,7 @@ def update_loop():
         elif _state["mode"] == 'MANUAL':
             if is_moving:
                 _state["is_coasting"] = False
-                if not _state["snap_locked"]:
-                    _state["shake_suppressed"] = False
+                _state["shake_suppressed"] = False
 
                 _state["buffer_pan"].append(diff_loc)
                 _state["buffer_zoom"].append(diff_dist)
@@ -357,7 +373,6 @@ class GKC_Preferences(bpy.types.AddonPreferences):
 # --- UI & HANDLERS ---
 @persistent
 def load_prefs_to_scene(dummy):
-    """Load defaults. Force Engine OFF."""
     try:
         prefs = bpy.context.preferences.addons.get(ADDON_NAME)
         scene = bpy.context.scene
@@ -451,7 +466,6 @@ def register():
     if load_prefs_to_scene not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(load_prefs_to_scene)
     
-    # REGISTER HEADER
     bpy.types.VIEW3D_HT_header.append(draw_header)
     
     if bpy.app.timers.is_registered(update_loop):
@@ -462,7 +476,6 @@ def unregister():
     if load_prefs_to_scene in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(load_prefs_to_scene)
         
-    # UNREGISTER HEADER
     bpy.types.VIEW3D_HT_header.remove(draw_header)
     
     for cls in classes: bpy.utils.unregister_class(cls)
