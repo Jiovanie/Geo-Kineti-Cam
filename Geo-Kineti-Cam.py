@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Geo-Kineti-Cam",
     "author": "Jiovanie Velazquez",
-    "version": (0, 9, 1),
+    "version": (0, 9, 11),
     "blender": (4, 2, 0),
     "location": "View3D > Header & N-Panel",
     "description": "A buttery viewport controller for smooth kinetic based navigation.",
@@ -42,6 +42,7 @@ def get_default_state():
         "buffer_zoom": [],
         "buffer_rot": [],
         "is_coasting": False,
+        "coasting_start_time": 0.0, # NEW: Track when coasting began
         "last_scan_time": 0.0
     }
 
@@ -233,9 +234,10 @@ def update_loop():
         
         _state["last_is_perspective"] = curr_is_persp
 
+        # --- OPTIMIZED AUTOPILOT CHECK ---
         now = time.time()
         if (now - _state["last_scan_time"]) > SCAN_INTERVAL:
-            if bpy.context.mode == 'EDIT_MESH' and s_auto_pilot:
+            if s_auto_pilot and bpy.context.mode == 'EDIT_MESH':
                 center, radius, sel_hash, iso_quat = get_target_data_bmesh(bpy.context)
                 _state["last_scan_time"] = now
                 if sel_hash and sel_hash != _state["last_sel_hash"]:
@@ -281,7 +283,7 @@ def update_loop():
         elif _state["mode"] == 'MANUAL':
             if is_moving:
                 _state["is_coasting"] = False
-                _state["shake_suppressed"] = False
+                _state["shake_suppressed"] = True # Set True so we don't fight user input
 
                 _state["buffer_pan"].append(diff_loc)
                 _state["buffer_zoom"].append(diff_dist)
@@ -296,7 +298,10 @@ def update_loop():
                     _state["vel_zoom"] = average_float(_state["buffer_zoom"])
                     _state["vel_rot"] = average_quat(_state["buffer_rot"])
                     has_nrg = _state["vel_pan"].length > 0.001 or abs(_state["vel_zoom"]) > 0.001 or _state["vel_rot"].angle > 0.0001
-                    if has_nrg: _state["is_coasting"] = True
+                    if has_nrg: 
+                        _state["is_coasting"] = True
+                        _state["coasting_start_time"] = time.time() # Capture start time
+                        _state["shake_suppressed"] = False
                     _state["buffer_pan"] = []
                     _state["buffer_zoom"] = []
                     _state["buffer_rot"] = []
@@ -327,8 +332,20 @@ def update_loop():
 
                     new_rot = _state["vel_rot"] @ rv3d.view_rotation
                     target_rot = stabilize_horizon(new_rot)
-                    rv3d.view_rotation = new_rot.slerp(target_rot, 0.1)
+                    
+                    # --- DYNAMIC STABILIZATION RAMP ---
+                    # Calculate how long we have been coasting
+                    coast_duration = time.time() - _state["coasting_start_time"]
+                    
+                    # Ramp from 0.0 to 0.1 over 0.5 seconds
+                    # This prevents the "Snap" when letting go, and prevents fighting if you grab it back quickly
+                    stab_alpha = 0.1
+                    if coast_duration < 0.5:
+                        stab_alpha = (coast_duration / 0.5) * 0.1
+                    
+                    rv3d.view_rotation = new_rot.slerp(target_rot, stab_alpha)
 
+        # --- OPTIMIZED IDLE SWAY ---
         if s_use_drift and s_drift > 0.001 and not _state["shake_suppressed"]:
             t = time.time()
             strength = s_drift * 0.05 
@@ -361,6 +378,7 @@ def update_loop():
         _state["last_rot"] = rv3d.view_rotation.copy()
         _state["last_dist"] = rv3d.view_distance
 
+        # IDLE SLEEP
         if not is_moving and not _state["is_coasting"] and (not s_use_drift or s_drift <= 0.001) and _state["mode"] == 'MANUAL':
             return 0.1
 
