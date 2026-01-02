@@ -157,17 +157,29 @@ def average_quat(buffer):
 
 def stabilize_horizon(quat):
     mat = quat.to_matrix()
-    view_z = mat.col[2] # Forward
-    view_x = mat.col[0] # Right
+    view_z = mat.col[2] 
+    
+    # Pole Check
+    z_tilt = abs(view_z.z)
+    if z_tilt > 0.99: return quat
 
+    view_x = mat.col[0] 
     flat_x = Vector((view_x.x, view_x.y, 0))
+    
     if flat_x.length_squared < 0.001: return quat
     
     flat_x.normalize()
     new_y = view_z.cross(flat_x).normalized()
     new_mat = Matrix((flat_x, new_y, view_z)).transposed()
+    stab_quat = new_mat.to_quaternion()
     
-    return new_mat.to_quaternion()
+    # Soft Blend near poles
+    blend_start = 0.8
+    if z_tilt > blend_start:
+        factor = (z_tilt - blend_start) / (0.99 - blend_start)
+        return stab_quat.slerp(quat, factor)
+    
+    return stab_quat
 
 def update_loop():
     try:
@@ -292,6 +304,10 @@ def update_loop():
             if _state["is_coasting"]:
                 friction = 0.98 - (s_friction * 0.08)
                 if friction < 0: friction = 0
+                
+                if _state["vel_rot"].angle > 0.002: 
+                     _state["vel_pan"] *= 0.8
+                
                 _state["vel_pan"] *= friction
                 _state["vel_zoom"] *= friction
                 identity = Quaternion((1,0,0,0))
@@ -301,9 +317,17 @@ def update_loop():
                     _state["is_coasting"] = False
                 else:
                     rv3d.view_location += _state["vel_pan"]
-                    rv3d.view_distance += _state["vel_zoom"]
+                    
+                    pred_dist = rv3d.view_distance + _state["vel_zoom"]
+                    if pred_dist < 0.01:
+                        rv3d.view_distance = 0.01
+                        _state["vel_zoom"] = 0.0
+                    else:
+                        rv3d.view_distance = pred_dist
+
                     new_rot = _state["vel_rot"] @ rv3d.view_rotation
-                    rv3d.view_rotation = stabilize_horizon(new_rot)
+                    target_rot = stabilize_horizon(new_rot)
+                    rv3d.view_rotation = new_rot.slerp(target_rot, 0.1)
 
         if s_use_drift and s_drift > 0.001 and not _state["shake_suppressed"]:
             t = time.time()
@@ -449,10 +473,12 @@ class HYBRID_PT_Panel(bpy.types.Panel):
         sub.active = scene.hybrid_use_drift 
         sub.prop(scene, "hybrid_drift", text="Intensity", slider=True)
         
+        layout.separator()
+        
         # --- VERSION FOOTER ---
         row = layout.row()
         row.alignment = 'RIGHT'
-        row.enabled = False
+        row.enabled = False 
         row.label(text=f"{bl_info['name']} v {bl_info['version'][0]}.{bl_info['version'][1]}.{bl_info['version'][2]}")
 
 classes = (GKC_Preferences, HYBRID_OT_Toggle, HYBRID_PT_Panel)
