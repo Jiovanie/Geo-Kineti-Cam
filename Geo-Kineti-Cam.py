@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Geo-Kineti-Cam",
     "author": "Jiovanie Velazquez",
-    "version": (0, 9, 12),
+    "version": (0, 9, 13),
     "blender": (4, 2, 0),
     "location": "View3D > Header & N-Panel",
     "description": "A buttery viewport controller for smooth kinetic based navigation.",
@@ -500,10 +500,10 @@ def register():
     bpy.types.Scene.hybrid_auto_pilot = bpy.props.BoolProperty(default=True, update=sync_auto_pilot, description="Automatically fly to and focus on selected mesh elements in Edit Mode")
     bpy.types.Scene.hybrid_break_on_manual = bpy.props.BoolProperty(default=True, update=sync_break, description="Disengage Auto-Pilot instantly when manual navigation is detected")
     bpy.types.Scene.hybrid_dist = bpy.props.FloatProperty(default=3.0, min=0.5, max=5.0, update=sync_dist, description="Distance multiplier when focusing on objects (Auto-Pilot)")
-    bpy.types.Scene.hybrid_speed = bpy.props.FloatProperty(default=0.03, min=0.0, max=3.0, update=sync_speed, description="Interpolation speed for the camera physics and auto-focus")
-    bpy.types.Scene.hybrid_friction = bpy.props.FloatProperty(default=0.12, min=0.0, max=2.0, update=sync_friction, description="Drag/Damping for manual camera movement (Lower = more slide)")
+    bpy.types.Scene.hybrid_speed = bpy.props.FloatProperty(default=0.002536, min=0.0, max=3.0, update=sync_speed, description="Interpolation speed for the camera physics and auto-focus")
+    bpy.types.Scene.hybrid_friction = bpy.props.FloatProperty(default=0.24474, min=0.0, max=2.0, update=sync_friction, description="Drag/Damping for manual camera movement (Lower = more slide)")
     bpy.types.Scene.hybrid_use_drift = bpy.props.BoolProperty(default=True, update=sync_use_drift, description="Enable idle camera movement")
-    bpy.types.Scene.hybrid_drift = bpy.props.FloatProperty(default=0.2, min=0.0, max=1.0, update=sync_drift, description="Intensity of the idle camera motion (Subtle floating effect)")
+    bpy.types.Scene.hybrid_drift = bpy.props.FloatProperty(default=0.486902, min=0.0, max=1.0, update=sync_drift, description="Intensity of the idle camera motion (Subtle floating effect)")
     
     for cls in classes: bpy.utils.register_class(cls)
     
