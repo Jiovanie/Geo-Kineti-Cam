@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Geo-Kineti-Cam",
     "author": "Jiovanie Velazquez",
-    "version": (0, 9, 5),
+    "version": (0, 9, 1),
     "blender": (4, 2, 0),
     "location": "View3D > Header & N-Panel",
     "description": "A buttery viewport controller for smooth kinetic based navigation.",
@@ -36,7 +36,7 @@ def get_default_state():
         "last_loc": None, 
         "last_rot": None,
         "last_dist": 0.0,
-        "last_is_perspective": True, # New tracking for Ortho/Persp switch
+        "last_is_perspective": True,
         "shake_suppressed": False, 
         "buffer_pan": [],
         "buffer_zoom": [],
@@ -71,6 +71,10 @@ def sync_friction(self, context):
 
 def sync_drift(self, context):
     try: context.preferences.addons[ADDON_NAME].preferences.val_drift = self.hybrid_drift
+    except: pass
+
+def sync_use_drift(self, context):
+    try: context.preferences.addons[ADDON_NAME].preferences.val_use_drift = self.hybrid_use_drift
     except: pass
 
 def sync_auto_pilot(self, context):
@@ -152,8 +156,6 @@ def average_quat(buffer):
     return avg
 
 def stabilize_horizon(quat):
-    # Flatten Right Vector (X) to allow upside-down rotation
-    # while keeping the horizon level relative to the screen.
     mat = quat.to_matrix()
     view_z = mat.col[2] # Forward
     view_x = mat.col[0] # Right
@@ -177,13 +179,13 @@ def update_loop():
         s_auto_pilot = scene.hybrid_auto_pilot
         s_break = scene.hybrid_break_on_manual
         s_drift = scene.hybrid_drift
+        s_use_drift = scene.hybrid_use_drift
         s_friction = scene.hybrid_friction
         s_speed = scene.hybrid_speed
 
         area, rv3d = get_region_data()
         if not rv3d: return None 
 
-        # 3. CAPTURE STATE
         curr_loc = rv3d.view_location.copy()
         curr_rot = rv3d.view_rotation.copy()
         curr_dist = rv3d.view_distance
@@ -194,9 +196,7 @@ def update_loop():
             _state["last_rot"] = curr_rot
             _state["last_dist"] = curr_dist
             _state["last_is_perspective"] = curr_is_persp
-            return 0.01
-
-        # 4. VELOCITY CALCS
+        
         diff_loc = curr_loc - _state["last_loc"]
         diff_dist = curr_dist - _state["last_dist"]
         diff_rot = curr_rot @ _state["last_rot"].inverted()
@@ -205,23 +205,14 @@ def update_loop():
         speed_rot = diff_rot.angle
         speed_dist = abs(diff_dist)
 
-        # --- SMART SNAP DETECTION ---
-        # 1. Did we switch Ortho/Persp modes?
         mode_switched = (curr_is_persp != _state["last_is_perspective"])
-        
-        # 2. Are we perfectly aligned to an Axis? (Gizmo/Numpad Snap)
-        # We check the View Z vector (Forward). If any component is ~1.0, we are snapped.
-        # Standard manual nav is rarely cleaner than 0.999
         view_z = curr_rot.to_matrix().col[2]
         is_axis_aligned = (abs(view_z.x) > 0.9999 or abs(view_z.y) > 0.9999 or abs(view_z.z) > 0.9999)
 
         if mode_switched or is_axis_aligned:
-            # Kill momentum immediately so we stick the snap
             wipe_physics()
             _state["last_shake_offset_loc"] = Vector((0,0,0))
             _state["last_shake_offset_rot"] = Quaternion((1,0,0,0))
-            
-            # Reset history
             _state["last_loc"] = curr_loc
             _state["last_rot"] = curr_rot
             _state["last_dist"] = curr_dist
@@ -229,9 +220,7 @@ def update_loop():
             return 0.01
         
         _state["last_is_perspective"] = curr_is_persp
-        # ----------------------------
 
-        # 5. CHECK SELECTION
         now = time.time()
         if (now - _state["last_scan_time"]) > SCAN_INTERVAL:
             if bpy.context.mode == 'EDIT_MESH' and s_auto_pilot:
@@ -252,7 +241,6 @@ def update_loop():
                         else: _state["target_rot"] = curr_rot
                     wipe_physics()
 
-        # 6. MODES
         is_moving = speed_loc > DEADZONE or speed_dist > DEADZONE or speed_rot > DEADZONE
         
         if _state["mode"] == 'AUTO' and not s_auto_pilot:
@@ -317,8 +305,7 @@ def update_loop():
                     new_rot = _state["vel_rot"] @ rv3d.view_rotation
                     rv3d.view_rotation = stabilize_horizon(new_rot)
 
-        # 7. DRIFT
-        if s_drift > 0.001 and not _state["shake_suppressed"]:
+        if s_use_drift and s_drift > 0.001 and not _state["shake_suppressed"]:
             t = time.time()
             strength = s_drift * 0.05 
             rot_strength = strength * 0.2 
@@ -350,8 +337,7 @@ def update_loop():
         _state["last_rot"] = rv3d.view_rotation.copy()
         _state["last_dist"] = rv3d.view_distance
 
-        # IDLE SLEEP
-        if not is_moving and not _state["is_coasting"] and s_drift <= 0.001 and _state["mode"] == 'MANUAL':
+        if not is_moving and not _state["is_coasting"] and (not s_use_drift or s_drift <= 0.001) and _state["mode"] == 'MANUAL':
             return 0.1
 
     except Exception as e:
@@ -368,6 +354,7 @@ class GKC_Preferences(bpy.types.AddonPreferences):
     val_dist: bpy.props.FloatProperty(default=3.0, description="Distance multiplier when focusing on objects (Auto-Pilot)")
     val_speed: bpy.props.FloatProperty(default=0.03, description="Interpolation speed for the camera physics and auto-focus")
     val_friction: bpy.props.FloatProperty(default=0.12, description="Drag/Damping for manual camera movement (Lower = more slide)")
+    val_use_drift: bpy.props.BoolProperty(default=True, description="Enable idle camera movement")
     val_drift: bpy.props.FloatProperty(default=0.2, description="Intensity of the idle camera motion (Subtle floating effect)")
 
 # --- UI & HANDLERS ---
@@ -382,6 +369,7 @@ def load_prefs_to_scene(dummy):
             scene.hybrid_dist = p.val_dist
             scene.hybrid_speed = p.val_speed
             scene.hybrid_friction = p.val_friction
+            scene.hybrid_use_drift = p.val_use_drift
             scene.hybrid_drift = p.val_drift
             scene.hybrid_auto_pilot = p.val_auto_pilot
             scene.hybrid_break_on_manual = p.val_break_on_manual
@@ -411,6 +399,7 @@ class HYBRID_OT_Toggle(bpy.types.Operator):
         _state["shake_suppressed"] = False
         
         if context.scene.hybrid_active:
+            _state["last_loc"] = None
             if not bpy.app.timers.is_registered(update_loop):
                 bpy.app.timers.register(update_loop)
         return {'FINISHED'}
@@ -437,16 +426,34 @@ class HYBRID_PT_Panel(bpy.types.Panel):
         layout.separator()
         layout.prop(scene, "hybrid_show_header", text="Show Header Button")
         
-        layout.separator()
-        layout.prop(scene, "hybrid_auto_pilot", text="Auto-Pilot")
-        layout.prop(scene, "hybrid_break_on_manual", text="Break on Manual")
+        # --- AUTO-PILOT GROUP ---
+        box_auto = layout.box()
+        box_auto.prop(scene, "hybrid_auto_pilot", text="Auto-Pilot") 
+        box_auto.prop(scene, "hybrid_dist", text="Auto Distance", slider=True)
+        box_auto.prop(scene, "hybrid_speed", text="Auto Speed", slider=True)
         
-        box = layout.box()
-        box.label(text="Settings")
-        box.prop(scene, "hybrid_dist", text="Auto Distance", slider=True)
-        box.prop(scene, "hybrid_speed", text="Auto Speed", slider=True)
-        box.prop(scene, "hybrid_friction", text="Drag", slider=True)
-        box.prop(scene, "hybrid_drift", text="Drift", slider=True)
+        layout.separator()
+        
+        # --- MANUAL GROUP (BREAK + DRAG) ---
+        box_manual = layout.box()
+        box_manual.prop(scene, "hybrid_break_on_manual", text="Break on Manual") 
+        box_manual.prop(scene, "hybrid_friction", text="Drag", slider=True)
+        
+        layout.separator()
+        
+        # --- SWAY GROUP ---
+        box_sway = layout.box()
+        col = box_sway.column(align=True)
+        col.prop(scene, "hybrid_use_drift", text="Idle Sway") 
+        sub = col.column()
+        sub.active = scene.hybrid_use_drift 
+        sub.prop(scene, "hybrid_drift", text="Intensity", slider=True)
+        
+        # --- VERSION FOOTER ---
+        row = layout.row()
+        row.alignment = 'RIGHT'
+        row.enabled = False
+        row.label(text=f"{bl_info['name']} v {bl_info['version'][0]}.{bl_info['version'][1]}.{bl_info['version'][2]}")
 
 classes = (GKC_Preferences, HYBRID_OT_Toggle, HYBRID_PT_Panel)
 
@@ -459,6 +466,7 @@ def register():
     bpy.types.Scene.hybrid_dist = bpy.props.FloatProperty(default=3.0, min=0.5, max=5.0, update=sync_dist, description="Distance multiplier when focusing on objects (Auto-Pilot)")
     bpy.types.Scene.hybrid_speed = bpy.props.FloatProperty(default=0.03, min=0.0, max=3.0, update=sync_speed, description="Interpolation speed for the camera physics and auto-focus")
     bpy.types.Scene.hybrid_friction = bpy.props.FloatProperty(default=0.12, min=0.0, max=2.0, update=sync_friction, description="Drag/Damping for manual camera movement (Lower = more slide)")
+    bpy.types.Scene.hybrid_use_drift = bpy.props.BoolProperty(default=True, update=sync_use_drift, description="Enable idle camera movement")
     bpy.types.Scene.hybrid_drift = bpy.props.FloatProperty(default=0.2, min=0.0, max=1.0, update=sync_drift, description="Intensity of the idle camera motion (Subtle floating effect)")
     
     for cls in classes: bpy.utils.register_class(cls)
@@ -486,6 +494,7 @@ def unregister():
     del bpy.types.Scene.hybrid_dist
     del bpy.types.Scene.hybrid_speed
     del bpy.types.Scene.hybrid_friction
+    del bpy.types.Scene.hybrid_use_drift
     del bpy.types.Scene.hybrid_drift
 
 if __name__ == "__main__":
