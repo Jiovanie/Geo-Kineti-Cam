@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Geo-Kineti-Cam",
     "author": "Jiovanie Velazquez",
-    "version": (0, 9, 11),
+    "version": (0, 9, 12),
     "blender": (4, 2, 0),
     "location": "View3D > Header & N-Panel",
     "description": "A buttery viewport controller for smooth kinetic based navigation.",
@@ -42,7 +42,7 @@ def get_default_state():
         "buffer_zoom": [],
         "buffer_rot": [],
         "is_coasting": False,
-        "coasting_start_time": 0.0, # NEW: Track when coasting began
+        "coasting_start_time": 0.0,
         "last_scan_time": 0.0
     }
 
@@ -160,7 +160,6 @@ def stabilize_horizon(quat):
     mat = quat.to_matrix()
     view_z = mat.col[2] 
     
-    # Pole Check
     z_tilt = abs(view_z.z)
     if z_tilt > 0.99: return quat
 
@@ -174,7 +173,6 @@ def stabilize_horizon(quat):
     new_mat = Matrix((flat_x, new_y, view_z)).transposed()
     stab_quat = new_mat.to_quaternion()
     
-    # Soft Blend near poles
     blend_start = 0.8
     if z_tilt > blend_start:
         factor = (z_tilt - blend_start) / (0.99 - blend_start)
@@ -234,7 +232,6 @@ def update_loop():
         
         _state["last_is_perspective"] = curr_is_persp
 
-        # --- OPTIMIZED AUTOPILOT CHECK ---
         now = time.time()
         if (now - _state["last_scan_time"]) > SCAN_INTERVAL:
             if s_auto_pilot and bpy.context.mode == 'EDIT_MESH':
@@ -283,7 +280,7 @@ def update_loop():
         elif _state["mode"] == 'MANUAL':
             if is_moving:
                 _state["is_coasting"] = False
-                _state["shake_suppressed"] = True # Set True so we don't fight user input
+                _state["shake_suppressed"] = True
 
                 _state["buffer_pan"].append(diff_loc)
                 _state["buffer_zoom"].append(diff_dist)
@@ -300,8 +297,12 @@ def update_loop():
                     has_nrg = _state["vel_pan"].length > 0.001 or abs(_state["vel_zoom"]) > 0.001 or _state["vel_rot"].angle > 0.0001
                     if has_nrg: 
                         _state["is_coasting"] = True
-                        _state["coasting_start_time"] = time.time() # Capture start time
+                        _state["coasting_start_time"] = time.time()
                         _state["shake_suppressed"] = False
+
+                        if _state["vel_rot"].angle > 0.003:
+                            _state["vel_pan"] = Vector((0,0,0))
+
                     _state["buffer_pan"] = []
                     _state["buffer_zoom"] = []
                     _state["buffer_rot"] = []
@@ -309,9 +310,6 @@ def update_loop():
             if _state["is_coasting"]:
                 friction = 0.98 - (s_friction * 0.08)
                 if friction < 0: friction = 0
-                
-                if _state["vel_rot"].angle > 0.002: 
-                     _state["vel_pan"] *= 0.8
                 
                 _state["vel_pan"] *= friction
                 _state["vel_zoom"] *= friction
@@ -333,19 +331,14 @@ def update_loop():
                     new_rot = _state["vel_rot"] @ rv3d.view_rotation
                     target_rot = stabilize_horizon(new_rot)
                     
-                    # --- DYNAMIC STABILIZATION RAMP ---
-                    # Calculate how long we have been coasting
                     coast_duration = time.time() - _state["coasting_start_time"]
                     
-                    # Ramp from 0.0 to 0.1 over 0.5 seconds
-                    # This prevents the "Snap" when letting go, and prevents fighting if you grab it back quickly
                     stab_alpha = 0.1
                     if coast_duration < 0.5:
                         stab_alpha = (coast_duration / 0.5) * 0.1
                     
                     rv3d.view_rotation = new_rot.slerp(target_rot, stab_alpha)
 
-        # --- OPTIMIZED IDLE SWAY ---
         if s_use_drift and s_drift > 0.001 and not _state["shake_suppressed"]:
             t = time.time()
             strength = s_drift * 0.05 
@@ -378,7 +371,6 @@ def update_loop():
         _state["last_rot"] = rv3d.view_rotation.copy()
         _state["last_dist"] = rv3d.view_distance
 
-        # IDLE SLEEP
         if not is_moving and not _state["is_coasting"] and (not s_use_drift or s_drift <= 0.001) and _state["mode"] == 'MANUAL':
             return 0.1
 
